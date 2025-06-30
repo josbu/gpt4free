@@ -44,7 +44,7 @@ class ConversationManager:
 
     def _load(self) -> None:
         """Load conversation from file."""
-        if not self.file_path.exists():
+        if not self.file_path.is_file():
             return
 
         try:
@@ -55,8 +55,10 @@ class ConversationManager:
                 if not self.provider:
                     self.provider = None
                 self.data = data.get("data", {})
-                if self.provider and data.get(self.provider):
-                    self.conversation = JsonConversation(**data.get(self.provider))
+                if self.provider and self.data.get(self.provider):
+                    self.conversation = JsonConversation(**self.data.get(self.provider))
+                elif not self.provider and self.data:
+                    self.conversation = JsonConversation(**self.data)
                 self.history = data.get("history", [])
         except (json.JSONDecodeError, KeyError) as e:
             print(f"Error loading conversation: {e}", file=sys.stderr)
@@ -65,7 +67,7 @@ class ConversationManager:
 
     def save(self) -> None:
         """Save conversation to file."""
-        if not self.file_path:
+        if self.file_path.exists() and not self.file_path.is_file():
             return
 
         try:
@@ -102,7 +104,6 @@ async def stream_response(
     image = None
     if isinstance(input_text, tuple):
         image, input_text = input_text
-    input_text = input_text.strip()
     
     if instructions:
         # Add system instructions to conversation if provided
@@ -136,13 +137,14 @@ async def stream_response(
         except (IOError, BrokenPipeError) as e:
             print(f"\nError writing to stdout: {e}", file=sys.stderr)
             break
+    print("\n", end="")
 
     conversation.conversation = getattr(last_chunk, 'conversation', None)
     response_content = response_content[0] if len(response_content) == 1 else "".join([str(chunk) for chunk in response_content])
     if output_file:
         if save_content(response_content, output_file):
             print(f"\nResponse saved to {output_file}")
-    
+
     if response_content:
         # Add assistant message to conversation
         conversation.add_message("assistant", str(response_content))
@@ -151,9 +153,12 @@ async def stream_response(
 
 def save_content(content, filepath: str, allowed_types = None):
     if hasattr(content, "urls"):
-        content = content.urls[0] if isinstance(content.urls, list) else content.urls
+        content = next(iter(content.urls), None) if isinstance(content.urls, list) else content.urls
     elif hasattr(content, "data"):
         content = content.data
+    if not content:
+        print("\nNo content to save.", file=sys.stderr)
+        return False
     if content.startswith("/media/"):
         os.rename(content.replace("/media", get_media_dir()).split("?")[0], filepath)
         return True
@@ -173,11 +178,14 @@ def save_content(content, filepath: str, allowed_types = None):
         with open(filepath, "w") as f:
             f.write(content)
             return True
+    else:
+        print("\nNo valid content to save.", file=sys.stderr)
+        return False
 
 def get_parser():
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(
-        description="GPT CLI client with conversation history",
+        description="G4F CLI client with conversation history",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
     parser.add_argument("--debug", "-d", action="store_true", help="Enable verbose logging.")
@@ -216,7 +224,7 @@ def get_parser():
         help="File to store/load conversation state"
     )
     parser.add_argument(
-        '--clear-history',
+        '-C', '--clear-history',
         action='store_true',
         help="Clear conversation history before starting"
     )
@@ -257,27 +265,31 @@ async def run_args(input_text: str, args):
         
         # Save conversation state
         conversation.save()
-        
-        print()  # Ensure final newline
-        
-    except Exception as e:
+    except:
         print(traceback.format_exc(), file=sys.stderr)
         sys.exit(1)
 
 def run_client_args(args):
     input_text = ""
     if args.input and os.path.isfile(args.input[0]):
-        with open(args.input[0], 'rb') as f:
-            if is_accepted_format(f.read(12)):
-                input_text = (Path(args.input[0]), " ".join(args.input[1:]))
-            else:
-                with open(input_text, 'r', encoding='utf-8') as f:
+        try:
+            with open(args.input[0], 'rb') as f:
+                if is_accepted_format(f.read(12)):
+                    input_text = (Path(args.input[0]), " ".join(args.input[1:]))
+        except ValueError:
+            # If not a valid image, read as text
+            try:
+                with open(args.input[0], 'r', encoding='utf-8') as f:
                     file_content = f.read().strip()
-                if len(input_text) > 1:
-                    input_text = " ".join(input_text[1:])
-                input_text = f"```{os.path.basename(input_text)}\n" + file_content + "\n```" + input_text
+            except UnicodeDecodeError:
+                print(f"Error reading file {args.input[0]} as text. Ensure it is a valid text file.", file=sys.stderr)
+                sys.exit(1)
+            if len(args.input) > 1:
+                input_text = f"{' '.join(args.input[1:])}\n```{os.path.basename(args.input[0])}\n{file_content}\n```"
+            else:
+                input_text = file_content
     elif args.input:
-        input_text = " ".join(args.input)
+        input_text = (" ".join(args.input)).strip()
     if not input_text:
         input_text = sys.stdin.read().strip()
     if not input_text:
